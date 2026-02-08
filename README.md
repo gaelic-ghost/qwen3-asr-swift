@@ -37,7 +37,7 @@ Add to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/ivan-digital/qwen3-asr-swift", from: "0.1.0")
+    .package(url: "https://github.com/ivan-digital/qwen3-asr-swift", branch: "main")
 ]
 ```
 
@@ -57,15 +57,15 @@ import Qwen3ASR
 // Load model
 let model = try await Qwen3ASRModel.fromPretrained(modelId: "Qwen/Qwen3-ASR-0.6B")
 
-// Transcribe audio (24kHz mono float samples)
-let transcription = model.transcribe(audio: audioSamples, sampleRate: 24000)
+// Transcribe audio (16kHz mono float samples)
+let transcription = model.transcribe(audio: audioSamples, sampleRate: 16000)
 print(transcription)
 ```
 
 ### Streaming Transcription
 
 ```swift
-await model.streamTranscribe(audio: audioSamples, sampleRate: 24000) { token in
+await model.streamTranscribe(audio: audioSamples, sampleRate: 16000) { token in
     print(token, terminator: "")
 }
 ```
@@ -103,7 +103,7 @@ swift build -c release --disable-sandbox
 See [Inference Architecture & Performance](docs/inference-architecture.md) for detailed optimization notes.
 
 ```
-Audio Input (24kHz)
+Audio Input (16kHz)
     │
     ▼
 ┌─────────────────┐

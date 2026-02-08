@@ -50,12 +50,12 @@ public class Qwen3ASRModel {
     /// Transcribe audio to text
     /// - Parameters:
     ///   - audio: Float audio samples
-    ///   - sampleRate: Sample rate of input audio (default 24000)
+    ///   - sampleRate: Sample rate of input audio (default 16000)
     ///   - language: Target output language (nil = auto-detect and transcribe in source language)
     ///   - maxTokens: Maximum tokens to generate
     public func transcribe(
         audio: [Float],
-        sampleRate: Int = 24000,
+        sampleRate: Int = 16000,
         language: String? = nil,
         maxTokens: Int = 448
     ) -> String {
