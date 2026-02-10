@@ -174,33 +174,6 @@ Reference audio (24kHz)
           (injected as speaker embedding in codec prefix)
 ```
 
-## Comparison with ASR Pipeline
-
-| Aspect | ASR | TTS |
-|--------|-----|-----|
-| Direction | Audio -> Text | Text -> Audio |
-| Input | 16kHz audio | Text string |
-| Output | Token string | 24kHz waveform |
-| Audio processing | Mel spectrogram (Accelerate) | Neural codec (Mimi, 682MB) |
-| Main transformer | 28 layers, 1D RoPE | 28 layers, **MRoPE** |
-| Additional stages | None | Code Predictor (5 layers) + Codec Decoder |
-| Decoding strategy | Greedy argmax | Sampling (top-k/p/temperature) |
-| Generation length | Short (text) | Long (codec tokens at 12.5 Hz) |
-
-## Swift Port: Reusable Components
-
-Directly reusable from the ASR codebase:
-
-| ASR Component | TTS Usage |
-|---------------|-----------|
-| `QuantizedTextDecoderLayer` (transformer block) | Talker layers (swap RoPE for MRoPE) |
-| `QuantizedTextAttention` (GQA + SDPA) | Both Talker and Code Predictor |
-| `QuantizedTextMLP` (SwiGLU) | All transformer blocks |
-| `PreQuantizedEmbedding` | Text embeddings |
-| KV cache management | All transformers |
-| `WeightLoader` + HF download | Extended for TTS weights |
-| `Tokenizer` (Qwen2 BPE) | Same tokenizer |
-
 ## Implementation Status
 
 | Component | Status | Lines |
