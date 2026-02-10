@@ -17,18 +17,18 @@ echo "[2/4] Building MLX metallib..."
 # Step 3: Copy metallib to test binary location
 echo "[3/4] Copying metallib to test bundle..."
 ARCH="$(uname -m)-apple-macosx"
-TEST_BUNDLE_DIR="$ROOT/.build/$ARCH/debug/Qwen3ASRPackageTests.xctest/Contents/MacOS"
 
 # Build tests first to ensure the bundle exists
 swift build --build-tests 2>&1
 
-if [[ -d "$TEST_BUNDLE_DIR" ]]; then
-  cp "$ROOT/.build/debug/mlx.metallib" "$TEST_BUNDLE_DIR/mlx.metallib"
-  echo "  Copied to $TEST_BUNDLE_DIR"
-else
-  echo "  Warning: test bundle not found at $TEST_BUNDLE_DIR"
-  echo "  Tests requiring MLX will fail"
-fi
+# Copy metallib to all test bundles
+for BUNDLE_NAME in Qwen3SpeechPackageTests Qwen3ASRPackageTests; do
+  TEST_BUNDLE_DIR="$ROOT/.build/$ARCH/debug/$BUNDLE_NAME.xctest/Contents/MacOS"
+  if [[ -d "$TEST_BUNDLE_DIR" ]]; then
+    cp "$ROOT/.build/debug/mlx.metallib" "$TEST_BUNDLE_DIR/mlx.metallib"
+    echo "  Copied to $TEST_BUNDLE_DIR"
+  fi
+done
 
 # Step 4: Run tests
 echo "[4/4] Running tests..."
