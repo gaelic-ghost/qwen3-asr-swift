@@ -1,4 +1,4 @@
-# Qwen3 Speech Swift
+# Qwen3-ASR
 
 A Swift implementation of Qwen3 speech models using [MLX Swift](https://github.com/ml-explore/mlx-swift) for Apple Silicon.
 
