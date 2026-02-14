@@ -96,6 +96,23 @@ swift build -c release
 .build/release/qwen3-tts-cli "Hello world" --output output.wav --language english
 ```
 
+### Streaming Synthesis
+
+Stream audio chunks for low-latency playback — first audio arrives before full generation completes:
+
+```swift
+for try await chunk in model.synthesizeStream(text: "Hello world", language: "english") {
+    if chunk.isFinal { break }
+    player.enqueue(chunk.samples)  // [Float] at 24kHz
+}
+```
+
+CLI:
+
+```bash
+.build/release/qwen3-tts-cli "Hello world" --stream --output output.wav
+```
+
 ### Sampling Options
 
 ```swift
@@ -202,7 +219,7 @@ swift test --filter Qwen3ASRIntegrationTests
 
 ## Roadmap
 
-- [ ] TTS streaming inference
+- [x] TTS streaming inference
 - [ ] TTS voice cloning (speaker encoder)
 - [ ] TTS voice design
 - [x] TTS inference optimizations (chunked decode, batch embeddings)
