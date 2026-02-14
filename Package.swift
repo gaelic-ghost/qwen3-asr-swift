@@ -13,20 +13,12 @@ let package = Package(
             targets: ["Qwen3ASR"]
         ),
         .library(
-            name: "Qwen3TTS",
-            targets: ["Qwen3TTS"]
-        ),
-        .library(
             name: "Qwen3Common",
             targets: ["Qwen3Common"]
         ),
         .executable(
             name: "qwen3-asr-cli",
             targets: ["Qwen3ASRCLI"]
-        ),
-        .executable(
-            name: "qwen3-tts-cli",
-            targets: ["Qwen3TTSCLI"]
         )
     ],
     dependencies: [
@@ -51,26 +43,10 @@ let package = Package(
                 .product(name: "MLXFast", package: "mlx-swift")
             ]
         ),
-        .target(
-            name: "Qwen3TTS",
-            dependencies: [
-                "Qwen3Common",
-                .product(name: "MLX", package: "mlx-swift"),
-                .product(name: "MLXNN", package: "mlx-swift"),
-                .product(name: "MLXFast", package: "mlx-swift")
-            ]
-        ),
         .executableTarget(
             name: "Qwen3ASRCLI",
             dependencies: [
                 "Qwen3ASR",
-                .product(name: "ArgumentParser", package: "swift-argument-parser")
-            ]
-        ),
-        .executableTarget(
-            name: "Qwen3TTSCLI",
-            dependencies: [
-                "Qwen3TTS",
                 .product(name: "ArgumentParser", package: "swift-argument-parser")
             ]
         ),
@@ -80,10 +56,6 @@ let package = Package(
             resources: [
                 .copy("Resources/test_audio.wav")
             ]
-        ),
-        .testTarget(
-            name: "Qwen3TTSTests",
-            dependencies: ["Qwen3TTS", "Qwen3ASR", "Qwen3Common"]
         )
     ]
 )
