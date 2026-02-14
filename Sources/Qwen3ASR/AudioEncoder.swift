@@ -23,6 +23,7 @@ public struct Qwen3AudioEncoderConfig {
     public let layerNormEps: Float   // 1e-5
     public let convOutInputDim: Int  // 7680 (480 channels * 16 spatial positions)
 
+    /// Config for Qwen3-ASR-0.6B (default)
     public static let `default` = Qwen3AudioEncoderConfig(
         dModel: 896,
         encoderAttentionHeads: 14,
@@ -31,6 +32,29 @@ public struct Qwen3AudioEncoderConfig {
         numMelBins: 128,
         maxSourcePositions: 1500,
         outputDim: 1024,
+        downsampleHiddenSize: 480,
+        convChunksize: 500,
+        nWindow: 50,
+        nWindowInfer: 800,
+        dropout: 0.0,
+        attentionDropout: 0.0,
+        activationDropout: 0.0,
+        layerNormEps: 1e-5,
+        convOutInputDim: 7680
+    )
+
+    /// Alias for 0.6B config
+    public static let small = `default`
+
+    /// Config for Qwen3-ASR-1.7B
+    public static let large = Qwen3AudioEncoderConfig(
+        dModel: 1024,
+        encoderAttentionHeads: 16,
+        encoderFFNDim: 4096,
+        encoderLayers: 24,
+        numMelBins: 128,
+        maxSourcePositions: 1500,
+        outputDim: 2048,
         downsampleHiddenSize: 480,
         convChunksize: 500,
         nWindow: 50,

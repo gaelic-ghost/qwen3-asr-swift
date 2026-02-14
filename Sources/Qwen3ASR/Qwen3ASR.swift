@@ -215,6 +215,46 @@ public extension Qwen3ASRModel {
     }
 }
 
+// MARK: - Model Size Detection
+
+/// Supported ASR model sizes
+public enum ASRModelSize {
+    case small  // 0.6B
+    case large  // 1.7B
+
+    /// Default model IDs on HuggingFace
+    public var defaultModelId: String {
+        switch self {
+        case .small: return "mlx-community/Qwen3-ASR-0.6B-4bit"
+        case .large: return "mlx-community/Qwen3-ASR-1.7B-8bit"
+        }
+    }
+
+    /// Audio encoder config for this model size
+    public var audioConfig: Qwen3AudioEncoderConfig {
+        switch self {
+        case .small: return .small
+        case .large: return .large
+        }
+    }
+
+    /// Text decoder config for this model size
+    public var textConfig: TextDecoderConfig {
+        switch self {
+        case .small: return .small
+        case .large: return .large
+        }
+    }
+
+    /// Detect model size from a HuggingFace model ID
+    public static func detect(from modelId: String) -> ASRModelSize {
+        if modelId.contains("1.7B") || modelId.contains("1.7b") {
+            return .large
+        }
+        return .small
+    }
+}
+
 // MARK: - Model Loading
 
 public extension Qwen3ASRModel {
@@ -224,6 +264,9 @@ public extension Qwen3ASRModel {
         progressHandler: ((Double, String) -> Void)? = nil
     ) async throws -> Qwen3ASRModel {
         progressHandler?(0.1, "Downloading model...")
+
+        // Auto-detect model size from model ID
+        let modelSize = ASRModelSize.detect(from: modelId)
 
         // Get cache directory
         let cacheDir = try HuggingFaceDownloader.getCacheDirectory(for: modelId)
@@ -242,8 +285,11 @@ public extension Qwen3ASRModel {
 
         progressHandler?(0.5, "Loading tokenizer...")
 
-        // Create model with default config
-        let model = Qwen3ASRModel()
+        // Create model with appropriate config for detected size
+        let model = Qwen3ASRModel(
+            audioConfig: modelSize.audioConfig,
+            textConfig: modelSize.textConfig
+        )
 
         // Load tokenizer from vocab.json
         let vocabPath = cacheDir.appendingPathComponent("vocab.json")

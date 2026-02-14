@@ -12,6 +12,7 @@ Papers: [Qwen3-ASR](https://arxiv.org/abs/2601.21337), [Qwen3-TTS](https://arxiv
 | Model | Task | Download Size | HuggingFace |
 |-------|------|--------------|-------------|
 | Qwen3-ASR-0.6B (4-bit) | ASR | ~400 MB | `mlx-community/Qwen3-ASR-0.6B-4bit` |
+| Qwen3-ASR-1.7B (8-bit) | ASR | ~2.5 GB | `mlx-community/Qwen3-ASR-1.7B-8bit` |
 | Qwen3-TTS-0.6B (4-bit) | TTS | ~977 MB + 651 MB codec | `mlx-community/Qwen3-TTS-12Hz-0.6B-Base-4bit` |
 
 ## Installation
@@ -48,7 +49,14 @@ import Qwen3Common // Shared utilities
 ```swift
 import Qwen3ASR
 
+// Default: 0.6B model
 let model = try await Qwen3ASRModel.fromPretrained()
+
+// Or use the larger 1.7B model for better accuracy
+let model = try await Qwen3ASRModel.fromPretrained(
+    modelId: "mlx-community/Qwen3-ASR-1.7B-8bit"
+)
+
 // Audio can be any sample rate — automatically resampled to 16kHz internally
 let transcription = model.transcribe(audio: audioSamples, sampleRate: 16000)
 print(transcription)
@@ -58,7 +66,12 @@ print(transcription)
 
 ```bash
 swift build -c release
+
+# Default (0.6B)
 .build/release/qwen3-asr-cli audio.wav
+
+# Use 1.7B model
+.build/release/qwen3-asr-cli --model 1.7B audio.wav
 ```
 
 ## TTS Usage
@@ -121,6 +134,7 @@ let audio = model.synthesize(text: "Hello", language: "english", sampling: confi
 | Model | Framework | RTF | 10s audio processed in |
 |-------|-----------|-----|------------------------|
 | Qwen3-ASR-0.6B (4-bit) | MLX Swift | ~0.06 | ~0.6s |
+| Qwen3-ASR-1.7B (8-bit) | MLX Swift | ~0.11 | ~1.1s |
 | Whisper-large-v3 | whisper.cpp (Q5_0) | ~0.10 | ~1.0s |
 | Whisper-small | whisper.cpp (Q5_0) | ~0.04 | ~0.4s |
 
@@ -142,7 +156,7 @@ See [ASR Inference](docs/asr-inference.md), [ASR Model](docs/asr-model.md), [TTS
 ### ASR Pipeline
 
 ```
-Audio (16kHz) -> Mel Spectrogram -> Audio Encoder (18L) -> Projector -> Text Decoder (28L) -> Text
+Audio (16kHz) -> Mel Spectrogram -> Audio Encoder (18/24L) -> Projector -> Text Decoder (28L) -> Text
 ```
 
 ### TTS Pipeline
@@ -199,6 +213,7 @@ swift test --filter Qwen3ASRIntegrationTests
 - [x] HuggingFace model download
 - [x] Tokenizer + language auto-detection
 - [x] Inference optimizations (SDPA, vectorized preprocessing)
+- [x] 0.6B (4-bit) and 1.7B (8-bit) model support
 
 ### TTS
 
@@ -215,6 +230,7 @@ swift test --filter Qwen3ASRIntegrationTests
 - [ ] TTS voice cloning (speaker encoder)
 - [ ] TTS voice design
 - [x] TTS inference optimizations (chunked decode, batch embeddings, batch synthesis)
+- [ ] ASR 1.7B (4-bit) quantized model
 - [ ] ASR streaming inference
 - [ ] iOS app example
 

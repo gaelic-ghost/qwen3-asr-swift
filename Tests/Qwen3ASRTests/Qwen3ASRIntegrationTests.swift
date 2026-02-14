@@ -18,7 +18,7 @@ final class Qwen3ASRIntegrationTests: XCTestCase {
     // MARK: - Model Loading Test
 
     func testModelLoading() async throws {
-        print("Testing model loading from HuggingFace...")
+        print("Testing 0.6B model loading from HuggingFace...")
 
         let model = try await Qwen3ASRModel.fromPretrained(
             modelId: Self.modelId
@@ -27,9 +27,11 @@ final class Qwen3ASRIntegrationTests: XCTestCase {
         }
 
         XCTAssertNotNil(model.audioEncoder)
-        XCTAssertEqual(model.audioEncoder.layers.count, 18, "Should have 18 transformer layers")
+        XCTAssertEqual(model.audioEncoder.layers.count, 18, "0.6B should have 18 transformer layers")
+        XCTAssertEqual(model.audioEncoder.config.dModel, 896)
+        XCTAssertEqual(model.audioEncoder.config.outputDim, 1024)
 
-        print("Model loaded successfully!")
+        print("0.6B model loaded successfully!")
     }
 
     // MARK: - Audio Encoding Test
@@ -171,6 +173,68 @@ final class Qwen3ASRIntegrationTests: XCTestCase {
 
         // RTF should be reasonable
         XCTAssertLessThan(rtf, 5.0, "Processing should be reasonably fast")
+    }
+
+    // MARK: - 1.7B Model Tests
+
+    func testLargeModelLoading() async throws {
+        let largeModelId = ASRModelSize.large.defaultModelId
+        print("Testing 1.7B model loading: \(largeModelId)")
+
+        let model = try await Qwen3ASRModel.fromPretrained(
+            modelId: largeModelId
+        ) { progress, status in
+            print("[\(Int(progress * 100))%] \(status)")
+        }
+
+        XCTAssertNotNil(model.audioEncoder)
+        XCTAssertEqual(model.audioEncoder.layers.count, 24, "1.7B should have 24 transformer layers")
+        XCTAssertEqual(model.audioEncoder.config.dModel, 1024)
+        XCTAssertEqual(model.audioEncoder.config.outputDim, 2048)
+        XCTAssertEqual(model.textConfig.hiddenSize, 2048)
+        XCTAssertEqual(model.textConfig.intermediateSize, 6144)
+        XCTAssertEqual(model.textConfig.bits, 8)
+
+        print("1.7B model loaded successfully!")
+    }
+
+    func testLargeModelFullPipeline() async throws {
+        guard let wavURL = Bundle.module.url(forResource: "test_audio", withExtension: "wav") else {
+            throw XCTSkip("Test WAV file not found in bundle resources")
+        }
+
+        let largeModelId = ASRModelSize.large.defaultModelId
+        print("Testing 1.7B full pipeline with real audio...")
+
+        let model = try await Qwen3ASRModel.fromPretrained(
+            modelId: largeModelId
+        ) { progress, status in
+            print("[\(Int(progress * 100))%] \(status)")
+        }
+
+        let (samples, sampleRate) = try AudioFileLoader.loadWAV(url: wavURL)
+        let targetSampleRate = 24000
+        let audio: [Float]
+        if sampleRate != targetSampleRate {
+            audio = AudioFileLoader.resampleForTest(samples, from: sampleRate, to: targetSampleRate)
+        } else {
+            audio = samples
+        }
+
+        let start = Date()
+        let result = model.transcribe(audio: audio, sampleRate: targetSampleRate)
+        let elapsed = Date().timeIntervalSince(start)
+
+        print("1.7B Transcription: \(result)")
+        print("Elapsed time: \(elapsed)s")
+
+        // Verify correct transcription
+        // Test audio contains: "Can you guarantee that the replacement part will be shipped tomorrow?"
+        XCTAssertFalse(result.isEmpty, "Transcription should not be empty")
+        XCTAssertTrue(result.contains("guarantee"), "Should transcribe 'guarantee'")
+        XCTAssertTrue(result.contains("replacement"), "Should transcribe 'replacement'")
+        XCTAssertTrue(result.contains("shipped"), "Should transcribe 'shipped'")
+        XCTAssertTrue(result.contains("tomorrow"), "Should transcribe 'tomorrow'")
     }
 }
 

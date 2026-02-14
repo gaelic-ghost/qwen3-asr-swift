@@ -17,14 +17,55 @@ final class Qwen3ASRTests: XCTestCase {
         XCTAssertEqual(config.outputDim, 1024)
     }
 
+    func testAudioEncoderLargeConfig() {
+        let config = Qwen3AudioEncoderConfig.large
+        XCTAssertEqual(config.dModel, 1024)
+        XCTAssertEqual(config.encoderLayers, 24)
+        XCTAssertEqual(config.encoderAttentionHeads, 16)
+        XCTAssertEqual(config.numMelBins, 128)
+        XCTAssertEqual(config.outputDim, 2048)
+        XCTAssertEqual(config.downsampleHiddenSize, 480)
+        XCTAssertEqual(config.convOutInputDim, 7680)
+    }
+
     func testTextDecoderConfig() {
         let smallConfig = TextDecoderConfig.small
         XCTAssertEqual(smallConfig.hiddenSize, 1024)
         XCTAssertEqual(smallConfig.numLayers, 28)
+        XCTAssertEqual(smallConfig.numHeads, 16)
+        XCTAssertEqual(smallConfig.numKVHeads, 8)
+        XCTAssertEqual(smallConfig.intermediateSize, 3072)
+        XCTAssertEqual(smallConfig.bits, 4)
 
         let largeConfig = TextDecoderConfig.large
-        XCTAssertEqual(largeConfig.hiddenSize, 1536)
+        XCTAssertEqual(largeConfig.hiddenSize, 2048)
         XCTAssertEqual(largeConfig.numLayers, 28)
+        XCTAssertEqual(largeConfig.numHeads, 16)
+        XCTAssertEqual(largeConfig.numKVHeads, 8)
+        XCTAssertEqual(largeConfig.intermediateSize, 6144)
+        XCTAssertEqual(largeConfig.bits, 8)
+    }
+
+    func testASRModelSizeDetection() {
+        XCTAssertEqual(
+            ASRModelSize.detect(from: "mlx-community/Qwen3-ASR-0.6B-4bit"),
+            .small)
+        XCTAssertEqual(
+            ASRModelSize.detect(from: "mlx-community/Qwen3-ASR-1.7B-8bit"),
+            .large)
+        XCTAssertEqual(
+            ASRModelSize.detect(from: "some-custom/model"),
+            .small)  // defaults to small
+    }
+
+    func testASRModelSizeConfigs() {
+        let small = ASRModelSize.small
+        XCTAssertEqual(small.audioConfig.dModel, 896)
+        XCTAssertEqual(small.textConfig.hiddenSize, 1024)
+
+        let large = ASRModelSize.large
+        XCTAssertEqual(large.audioConfig.dModel, 1024)
+        XCTAssertEqual(large.textConfig.hiddenSize, 2048)
     }
 
     func testQwen3ASRConfig() {

@@ -4,6 +4,10 @@
 
 Qwen3-ASR is an encoder-decoder model: audio encoder extracts features, text decoder generates transcription tokens autoregressively.
 
+Two model sizes are supported:
+- **0.6B** (`mlx-community/Qwen3-ASR-0.6B-4bit`) — 4-bit quantized, ~0.4 GB
+- **1.7B** (`mlx-community/Qwen3-ASR-1.7B-8bit`) — 8-bit quantized, ~2.5 GB
+
 ```
 Audio (16kHz mono)
     |
@@ -15,19 +19,19 @@ Audio (16kHz mono)
          |
          v
 +-------------------+
-|  Audio Encoder    |   Conv2D (3 layers, stride-2) + Transformer (18 layers)
-|  896 hidden dim   |   Block attention, sinusoidal pos embeddings
+|  Audio Encoder    |   Conv2D (3 layers, stride-2) + Transformer
+|                   |   Block attention, sinusoidal pos embeddings
 +--------+----------+
          |
          v
 +-------------------+
-|  Projector        |   2-layer MLP (896 -> 1024)
+|  Projector        |   2-layer MLP (dModel -> outputDim)
 +--------+----------+
          |  audio embeddings injected into decoder (no variance scaling)
          v
 +-------------------+
-|  Text Decoder     |   Qwen3 LLM (28 layers, 4-bit quantized)
-|  1024 hidden dim  |   GQA, RoPE, SwiGLU, KV cache
+|  Text Decoder     |   Qwen3 LLM (28 layers, quantized)
+|                   |   GQA, RoPE, SwiGLU, KV cache
 +--------+----------+
          |
          v
@@ -38,10 +42,13 @@ Audio (16kHz mono)
 
 | Parameter | 0.6B | 1.7B |
 |-----------|------|------|
-| Hidden size | 896 | 1280 |
-| Layers | 18 | 18 |
-| Attention heads | 14 | 20 |
+| Hidden size (d_model) | 896 | 1024 |
+| Layers | 18 | 24 |
+| Attention heads | 14 | 16 |
+| FFN dim | 3584 | 4096 |
+| Output dim (projector) | 1024 | 2048 |
 | Conv2D layers | 3 (stride 2 each = 8x downsample) | 3 |
+| Downsample hidden size | 480 | 480 |
 | Position encoding | Sinusoidal (cached) | Sinusoidal |
 | Attention type | Block attention (chunked) | Block attention |
 | Chunk size | 100 frames (configurable) | 100 frames |
@@ -59,14 +66,16 @@ Audio (16kHz mono)
 | Attention heads (Q) | 16 | 16 |
 | KV heads (GQA) | 8 | 8 |
 | Head dimension | 128 | 128 |
-| Intermediate size (MLP) | 3072 | 8192 |
+| Intermediate size (MLP) | 3072 | 6144 |
 | Vocab size | 151936 | 151936 |
 | RoPE base | 1,000,000 | 1,000,000 |
-| RoPE type | Standard 1D | Standard 1D |
-| Quantization | 4-bit (group=64, bits=4) | 4-bit |
+| RoPE type | MRoPE [24,20,20]* | MRoPE [24,20,20]* |
+| Quantization | 4-bit (group=64) | 8-bit (group=64) |
 | Activation | SwiGLU | SwiGLU |
 | Norm | RMSNorm (eps=1e-6) | RMSNorm |
 | Q/K normalization | RMSNorm per head | RMSNorm per head |
+
+*Both models use MRoPE config in HuggingFace, but for ASR (single-modal, no image input) all 3 position dimensions are identical, so it reduces to standard 1D RoPE at inference time.
 
 **Transformer block:**
 ```
@@ -94,4 +103,4 @@ x -> RMSNorm -> Attention(Q/K/V projections, Q/K RMSNorm, RoPE, GQA via SDPA) ->
 | `vocab.json` | Token-to-ID mapping |
 | `tokenizer_config.json` | Tokenizer settings + added tokens |
 
-Total size: ~0.4 GB (4-bit quantized 0.6B model)
+Total size: ~0.4 GB (0.6B 4-bit), ~2.5 GB (1.7B 8-bit)

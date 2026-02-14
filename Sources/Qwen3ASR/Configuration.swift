@@ -35,7 +35,7 @@ public struct AudioEncoderConfig: Codable, Sendable {
     public static var large: AudioEncoderConfig {
         var config = AudioEncoderConfig()
         config.hiddenDim = 1024
-        config.numLayers = 18
+        config.numLayers = 24
         config.numHeads = 16
         config.headDim = 64
         config.ffnDim = 4096
@@ -81,14 +81,14 @@ public struct TextDecoderConfig: Codable, Sendable {
     /// Config for Qwen3-ASR-1.7B decoder
     public static var large: TextDecoderConfig {
         var config = TextDecoderConfig()
-        config.hiddenSize = 1536
+        config.hiddenSize = 2048
         config.numLayers = 28
-        config.numHeads = 12
-        config.numKVHeads = 2
+        config.numHeads = 16
+        config.numKVHeads = 8
         config.headDim = 128
-        config.intermediateSize = 8960
+        config.intermediateSize = 6144
         config.groupSize = 64
-        config.bits = 4
+        config.bits = 8
         return config
     }
 }
