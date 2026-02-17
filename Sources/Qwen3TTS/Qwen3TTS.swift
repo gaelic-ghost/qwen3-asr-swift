@@ -19,6 +19,24 @@ public class Qwen3TTSModel {
 
     private var tokenizer: Qwen3Tokenizer?
 
+    /// Compiled talker generation step (28-layer transformer + codec head) for kernel fusion.
+    /// Fuses ~420 Metal kernel dispatches per step into fewer optimized kernels.
+    ///
+    /// Uses shapeless=true: handles growing KV cache without recompilation.
+    /// RoPE offset is passed as a regular function input (compile treats inputs as variables).
+    /// Batch dimension uses -1 reshapes so the same compiled graph works for any batch size.
+    private var compiledTalkerStep: (([MLXArray]) -> [MLXArray])?
+
+    /// Compiled code predictor transformer (layers + norm, no lm_head) for kernel fusion.
+    /// Used for groups 1-14 of per-timestep code prediction (seqLen=1 with cache).
+    ///
+    /// Uses shapeless=false: one compiled graph per cache size (14 sizes, compiled once during warmup).
+    /// Each group i always has cache seqLen=i+2, so compiled graphs are reused across timesteps.
+    ///
+    /// Talker is compiled with shapeless=true — RoPE offset passed as regular MLXArray input,
+    /// growing KV cache handled by shapeless mode, batch dim uses -1 reshapes.
+    private var compiledCPTransformer: (([MLXArray]) -> [MLXArray])?
+
     public init(config: Qwen3TTSConfig = .base06B) {
         self.config = config
         self.talker = TalkerModel(config: config.talker)
@@ -293,11 +311,10 @@ public class Qwen3TTSModel {
 
         // Prefill
         let prefillLen = batchPrefill.dim(1)
-        let positionIds = buildTTSPositionIds(seqLen: prefillLen)  // [3, 1, 9] — broadcasts over B
 
         var (logits, hiddenStates, talkerCache) = talker(
             inputsEmbeds: batchPrefill,
-            positionIds: positionIds,
+            offset: MLXArray(Int32(0)),
             cache: nil)
 
         // Sample first token for each item
@@ -351,12 +368,9 @@ public class Qwen3TTSModel {
                 + codePredictor.batchEmbedAllGroupsBatch(cpTokens)  // [B, 1, D]
 
             let stepEmbeds = textEmbed + codecEmbed  // [B, 1, D]
-            let stepPosIds = buildTTSPositionIds(seqLen: 1, offset: step)
 
-            let newResult = talker(
-                inputsEmbeds: stepEmbeds,
-                positionIds: stepPosIds,
-                cache: talkerCache)
+            let newResult = executeTalkerStep(
+                embeds: stepEmbeds, offset: step, cache: talkerCache)
             logits = newResult.0
             hiddenStates = newResult.1
             talkerCache = newResult.2
@@ -472,15 +486,15 @@ public class Qwen3TTSModel {
 
         var groupTokens: [MLXArray] = [prevTokens]  // list of [B]
 
-        // Remaining 14 codebook groups
+        // Remaining 14 codebook groups (compiled transformer + separate lm_head)
         for groupIdx in 1..<numGroups {
             let prevEmbed = codePredictor.embedCodecGroup(
                 prevTokens.expandedDimensions(axis: 1),
                 groupIndex: groupIdx - 1)  // [B, 1, D]
 
-            (cpLogits, cpNewCache) = codePredictor(
-                inputsEmbeds: prevEmbed, groupIndex: groupIdx, cache: cpCache)
-            cpCache = cpNewCache
+            let cpResult = executeCPTransformerStep(hidden: prevEmbed, cache: cpCache!)
+            cpCache = cpResult.newCache
+            cpLogits = codePredictor.lmHeads[groupIdx](cpResult.normed)
 
             prevTokens = sampleTokensBatch(
                 logits: cpLogits,
@@ -542,7 +556,7 @@ public class Qwen3TTSModel {
                         text: text, langId: langId, speakerTokenId: speakerTokenId,
                         tokenizer: tokenizer, sampling: sampling, chunkSize: chunkSize)
 
-                    let decodeChunkSize = 12
+                    let decodeChunkSize = 25
                     let leftContextSize = 10
                     let samplesPerFrame = 1920
                     let numCodeGroups = self.config.codePredictor.numCodeGroups
@@ -650,10 +664,9 @@ public class Qwen3TTSModel {
                 eval(prefillEmbeds, trailingTextHidden, ttsPadEmbed)
 
                 let prefillLen = prefillEmbeds.dim(1)
-                let positionIds = buildTTSPositionIds(seqLen: prefillLen)
 
                 var (logits, hiddenStates, newCache) = self.talker(
-                    inputsEmbeds: prefillEmbeds, positionIds: positionIds, cache: nil)
+                    inputsEmbeds: prefillEmbeds, offset: MLXArray(Int32(0)), cache: nil)
                 var talkerCache: [(MLXArray, MLXArray)]? = newCache
 
                 let lastLogits = logits[0..., (prefillLen - 1)..<prefillLen, 0...]
@@ -699,11 +712,12 @@ public class Qwen3TTSModel {
                         + self.codePredictor.batchEmbedAllGroups(codeTokens)
 
                     let stepEmbeds = textEmbed + codecEmbed
-                    let stepPosIds = buildTTSPositionIds(seqLen: 1, offset: step)
 
-                    (logits, hiddenStates, newCache) = self.talker(
-                        inputsEmbeds: stepEmbeds, positionIds: stepPosIds, cache: talkerCache)
-                    talkerCache = newCache
+                    let streamStepResult = self.executeTalkerStep(
+                        embeds: stepEmbeds, offset: step, cache: talkerCache!)
+                    logits = streamStepResult.0
+                    hiddenStates = streamStepResult.1
+                    talkerCache = streamStepResult.2
 
                     nextToken = sampleToken(
                         logits: logits, config: sampling,
@@ -811,6 +825,9 @@ public class Qwen3TTSModel {
     public func warmUp() {
         guard let tokenizer = tokenizer else { return }
 
+        // Set up compiled code predictor for kernel fusion
+        setupCompilation()
+
         // Run a minimal prefill through the talker to compile all Metal shaders.
         let textTokens = prepareTextTokens(text: "hi", tokenizer: tokenizer)
         let codecPrefix = buildCodecPrefix(languageId: CodecTokens.languageEnglish)
@@ -820,10 +837,16 @@ public class Qwen3TTSModel {
 
         // Talker prefill: compiles all 28-layer attention + MLP shaders
         let prefillLen = prefillEmbeds.dim(1)
-        let positionIds = buildTTSPositionIds(seqLen: prefillLen)
-        let (logits, hiddenStates, _) = talker(
-            inputsEmbeds: prefillEmbeds, positionIds: positionIds, cache: nil)
+        let (logits, hiddenStates, talkerWarmupCache) = talker(
+            inputsEmbeds: prefillEmbeds, offset: MLXArray(Int32(0)), cache: nil)
         eval(logits)
+
+        // Pre-compile talker generation step (shapeless=true, traced once here).
+        // Uses the cache from prefill so the compiled graph includes cache concatenation.
+        let warmupCodecEmbed = talker.embedCodec(MLXArray([Int32(0)]).expandedDimensions(axis: 0))
+        let (warmupLogits, _, _) = executeTalkerStep(
+            embeds: warmupCodecEmbed, offset: prefillLen, cache: talkerWarmupCache)
+        eval(warmupLogits)
 
         // Parallel code predictor: compiles 5-layer shaders + all 15 lm_heads
         let lastHidden = hiddenStates[0..., (prefillLen - 1)..<prefillLen, 0...]
@@ -831,6 +854,137 @@ public class Qwen3TTSModel {
         let cpInput = concatenated([lastHidden, code0Embed], axis: 1)
         let allLogits = codePredictor.predictAllGroupsParallel(inputsEmbeds: cpInput)
         eval(allLogits)
+
+        // Pre-compile CP transformer for all 14 cache sizes (groups 1-14).
+        // Each group i has cache seqLen = i+2, which is constant across timesteps.
+        // This traces + compiles 14 graphs during warmup so generation pays zero compile cost.
+        let (_, cpPrefillCache) = codePredictor(
+            inputsEmbeds: cpInput, groupIndex: 0, cache: nil)
+        var cpCache: [(MLXArray, MLXArray)] = cpPrefillCache
+        let numGroups = config.codePredictor.numCodeGroups - 1  // 15
+        for groupIdx in 1..<numGroups {
+            let (cpNormed, newCPCache) = executeCPTransformerStep(
+                hidden: code0Embed, cache: cpCache)
+            cpCache = newCPCache
+            let groupLogits = codePredictor.lmHeads[groupIdx](cpNormed)
+            eval(groupLogits)
+        }
+    }
+
+    // MARK: - Compiled Generation Steps
+
+    /// Initialize compiled talker and code predictor for Metal kernel fusion.
+    ///
+    /// MLX.compile() traces the computation graph on first call and replays it
+    /// on subsequent calls, fusing small kernel calls into larger ones.
+    ///
+    /// Talker: compiled with shapeless=true. RoPE offset is passed as a regular MLXArray
+    /// input (compile treats inputs as variables, not constants). Growing KV cache is
+    /// handled by shapeless mode. Batch dimension uses -1 reshapes for any batch size.
+    ///
+    /// Code predictor: compiled with shapeless=false. 14 fixed cache sizes, compiled
+    /// once during warmup, reused for all subsequent timesteps.
+    func setupCompilation() {
+        // Compiled talker: [embeds, offset, K0, V0, ..., K27, V27] →
+        //                  [logits, hidden, K0, V0, ..., K27, V27]
+        // Offset is a regular function input (compile treats inputs as variables, not constants).
+        let talkerRef = talker
+        let numTalkerLayers = config.talker.numLayers
+
+        compiledTalkerStep = compile(
+            inputs: [talkerRef], outputs: [talkerRef], shapeless: true
+        ) { inputs in
+            let embeds = inputs[0]
+            let offset = inputs[1]  // MLXArray scalar — dynamic, not baked
+            var cache: [(MLXArray, MLXArray)] = []
+            for i in 0..<numTalkerLayers {
+                cache.append((inputs[2 + i * 2], inputs[3 + i * 2]))
+            }
+
+            let (logits, hidden, newCache) = talkerRef(
+                inputsEmbeds: embeds, offset: offset, cache: cache)
+
+            var result = [logits, hidden]
+            for (k, v) in newCache { result.append(k); result.append(v) }
+            return result
+        }
+        let numCPLayers = config.codePredictor.numLayers
+        let cpRef = codePredictor
+
+        // Compiled CP transformer: hidden + 5×(K,V) cache → normed + 5×(K,V) cache
+        // Does NOT include lm_head (applied separately per group index)
+        compiledCPTransformer = compile(
+            inputs: [cpRef], outputs: [cpRef], shapeless: false
+        ) { inputs in
+            var hidden = inputs[0]
+            var cpCache: [(MLXArray, MLXArray)] = []
+            for i in 0..<numCPLayers {
+                cpCache.append((inputs[1 + i * 2], inputs[2 + i * 2]))
+            }
+            var newCache: [(MLXArray, MLXArray)] = []
+            for (i, layer) in cpRef.layers.enumerated() {
+                let (output, updated) = layer(hidden, attentionMask: nil, cache: cpCache[i])
+                hidden = output
+                newCache.append(updated)
+            }
+            hidden = cpRef.norm(hidden)
+            var result = [hidden]
+            for (k, v) in newCache { result.append(k); result.append(v) }
+            return result
+        }
+    }
+
+    /// Execute a talker generation step (compiled when available).
+    ///
+    /// The compiled path fuses ~420 Metal kernel dispatches (28 layers × ~15 ops) into
+    /// fewer optimized kernels. Uses shapeless=true to handle growing KV cache without
+    /// recompilation. RoPE offset is passed as a regular MLXArray input (not baked).
+    private func executeTalkerStep(
+        embeds: MLXArray, offset: Int, cache: [(MLXArray, MLXArray)]
+    ) -> (MLXArray, MLXArray, [(MLXArray, MLXArray)]) {
+        guard let compiled = compiledTalkerStep else {
+            return talker(inputsEmbeds: embeds, offset: MLXArray(Int32(offset)), cache: cache)
+        }
+
+        // Flatten inputs: [embeds, offset, K0, V0, K1, V1, ..., K27, V27]
+        let offsetArray = MLXArray(Int32(offset))
+        var flatInputs = [embeds, offsetArray]
+        for (k, v) in cache { flatInputs.append(k); flatInputs.append(v) }
+
+        let out = compiled(flatInputs)
+
+        // Unflatten: [logits, hidden, K0, V0, ..., K27, V27]
+        var newCache: [(MLXArray, MLXArray)] = []
+        for i in 0..<config.talker.numLayers {
+            newCache.append((out[2 + i * 2], out[3 + i * 2]))
+        }
+        return (out[0], out[1], newCache)
+    }
+
+    /// Execute a code predictor transformer step (layers + norm, no lm_head).
+    /// For single-token steps (seqLen=1) where no attention mask is needed.
+    /// Apply codePredictor.lmHeads[groupIndex] to the normed output separately.
+    private func executeCPTransformerStep(
+        hidden: MLXArray, cache: [(MLXArray, MLXArray)]
+    ) -> (normed: MLXArray, newCache: [(MLXArray, MLXArray)]) {
+        guard let compiled = compiledCPTransformer else {
+            var h = hidden
+            var newCache: [(MLXArray, MLXArray)] = []
+            for (i, layer) in codePredictor.layers.enumerated() {
+                let (output, updated) = layer(h, attentionMask: nil, cache: cache[i])
+                h = output
+                newCache.append(updated)
+            }
+            return (codePredictor.norm(h), newCache)
+        }
+        var flatInputs = [hidden]
+        for (k, v) in cache { flatInputs.append(k); flatInputs.append(v) }
+        let out = compiled(flatInputs)
+        var newCache: [(MLXArray, MLXArray)] = []
+        for i in 0..<config.codePredictor.numLayers {
+            newCache.append((out[1 + i * 2], out[2 + i * 2]))
+        }
+        return (out[0], newCache)
     }
 
     // MARK: - Speaker Resolution
@@ -1025,12 +1179,11 @@ public class Qwen3TTSModel {
         let cpSamplingConfig = SamplingConfig(temperature: sampling.temperature, topK: sampling.topK)
 
         let prefillLen = prefillEmbeds.dim(1)
-        let positionIds = buildTTSPositionIds(seqLen: prefillLen)
 
         // Prefill
         var (logits, hiddenStates, newCache) = talker(
             inputsEmbeds: prefillEmbeds,
-            positionIds: positionIds,
+            offset: MLXArray(Int32(0)),
             cache: talkerCache)
         talkerCache = newCache
 
@@ -1084,12 +1237,9 @@ public class Qwen3TTSModel {
 
             // Next input = text + codec (element-wise sum)
             let stepEmbeds = textEmbed + codecEmbed  // [1, 1, D]
-            let stepPosIds = buildTTSPositionIds(seqLen: 1, offset: step)
 
-            (logits, hiddenStates, newCache) = talker(
-                inputsEmbeds: stepEmbeds,
-                positionIds: stepPosIds,
-                cache: talkerCache)
+            (logits, hiddenStates, newCache) = executeTalkerStep(
+                embeds: stepEmbeds, offset: step, cache: talkerCache!)
             talkerCache = newCache
 
             nextToken = sampleToken(
@@ -1166,7 +1316,7 @@ public class Qwen3TTSModel {
         let prefillInput = concatenated([hiddenState, code0Embed], axis: 1)  // [1, 2, D]
 
         // Predict codebook group 0 (= codebook 2 overall)
-        var (cpLogits, cpNewCache) = codePredictor(
+        let (cpLogits, cpNewCache) = codePredictor(
             inputsEmbeds: prefillInput, groupIndex: 0, cache: nil)
         cpCache = cpNewCache
 
@@ -1175,18 +1325,18 @@ public class Qwen3TTSModel {
         var prevToken = sampleToken(logits: lastCpLogits, config: cpSamplingConfig)
         codeTokens.append(prevToken)
 
-        // Remaining 14 codebook groups
+        // Remaining 14 codebook groups (compiled transformer + separate lm_head)
         for groupIdx in 1..<(config.codePredictor.numCodeGroups - 1) {
             // Embed previous group's token
             let prevEmbed = codePredictor.embedCodecGroup(
                 MLXArray([prevToken]).expandedDimensions(axis: 0),
                 groupIndex: groupIdx - 1)  // [1, 1, D]
 
-            (cpLogits, cpNewCache) = codePredictor(
-                inputsEmbeds: prevEmbed, groupIndex: groupIdx, cache: cpCache)
-            cpCache = cpNewCache
+            let cpResult = executeCPTransformerStep(hidden: prevEmbed, cache: cpCache!)
+            cpCache = cpResult.newCache
+            let groupLogits = codePredictor.lmHeads[groupIdx](cpResult.normed)
 
-            prevToken = sampleToken(logits: cpLogits, config: cpSamplingConfig)
+            prevToken = sampleToken(logits: groupLogits, config: cpSamplingConfig)
             codeTokens.append(prevToken)
         }
 

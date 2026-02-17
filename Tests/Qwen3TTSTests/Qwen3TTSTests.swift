@@ -95,14 +95,6 @@ final class Qwen3TTSConfigTests: XCTestCase {
         XCTAssertEqual(config.speechTokenizerDecoder.sampleRate, 24000)
     }
 
-    func testMRoPESections() {
-        let config = TalkerConfig()
-        // Sections must sum to headDim/2
-        let halfDim = config.headDim / 2
-        let sectionSum = config.mropeSections.reduce(0, +)
-        XCTAssertEqual(sectionSum, halfDim, "MRoPE sections \(config.mropeSections) should sum to headDim/2 (\(halfDim))")
-    }
-
     func testUpsampleRateProduct() {
         let config = SpeechTokenizerDecoderConfig()
         // Total upsample = product(upsampleRates) * product(upsamplingRatios)
