@@ -101,45 +101,24 @@ public enum HuggingFaceDownloader {
         return local
     }
 
-    /// Create a URLSession configured for large model downloads
-    private static func makeSession() -> URLSession {
-        let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 30      // 30s to start receiving data
-        config.timeoutIntervalForResource = 600    // 10 min max per file
-        config.waitsForConnectivity = true
-        return URLSession(configuration: config)
-    }
-
-    /// Download a single file with retry logic, streaming to disk
+    /// Download a single file with retry logic and byte-level progress reporting.
     private static func downloadFile(
         url: URL,
         to localPath: URL,
-        session: URLSession,
-        fileName: String
+        fileName: String,
+        progressHandler: ((Int64, Int64) -> Void)? = nil
     ) async throws {
         var lastError: Error?
 
         for attempt in 1...maxRetries {
             do {
-                let (tempURL, response) = try await session.download(from: url)
-
-                guard let httpResponse = response as? HTTPURLResponse,
-                      httpResponse.statusCode == 200 else {
-                    let status = (response as? HTTPURLResponse)?.statusCode ?? -1
-                    throw DownloadError.failedToDownload("\(fileName) (HTTP \(status))")
-                }
-
-                // Move downloaded file to final location
-                let fm = FileManager.default
-                if fm.fileExists(atPath: localPath.path) {
-                    try fm.removeItem(at: localPath)
-                }
-                try fm.moveItem(at: tempURL, to: localPath)
+                try await downloadFileOnce(
+                    url: url, to: localPath, fileName: fileName,
+                    progressHandler: progressHandler)
                 return  // Success
             } catch {
                 lastError = error
                 if attempt < maxRetries {
-                    // Exponential backoff: 1s, 2s, 4s
                     let delay = UInt64(pow(2.0, Double(attempt - 1))) * 1_000_000_000
                     print("[Download] Retry \(attempt)/\(maxRetries) for \(fileName): \(error.localizedDescription)")
                     try? await Task.sleep(nanoseconds: delay)
@@ -150,7 +129,32 @@ public enum HuggingFaceDownloader {
         throw lastError ?? DownloadError.failedToDownload(fileName)
     }
 
-    /// Download model files from HuggingFace
+    /// Single download attempt using URLSessionDownloadTask with delegate for byte-level progress.
+    private static func downloadFileOnce(
+        url: URL,
+        to localPath: URL,
+        fileName: String,
+        progressHandler: ((Int64, Int64) -> Void)? = nil
+    ) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            let delegate = DownloadDelegate(
+                localPath: localPath,
+                fileName: fileName,
+                continuation: continuation,
+                onProgress: progressHandler
+            )
+            let config = URLSessionConfiguration.default
+            config.timeoutIntervalForRequest = 30
+            config.timeoutIntervalForResource = 600
+            config.waitsForConnectivity = true
+            let session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
+            delegate.session = session
+            let task = session.downloadTask(with: url)
+            task.resume()
+        }
+    }
+
+    /// Download model files from HuggingFace with smooth byte-level progress.
     public static func downloadWeights(
         modelId: String,
         to directory: URL,
@@ -158,8 +162,6 @@ public enum HuggingFaceDownloader {
         progressHandler: ((Double) -> Void)? = nil
     ) async throws {
         let baseURL = "https://huggingface.co/\(modelId)/resolve/main"
-        let session = makeSession()
-        defer { session.finishTasksAndInvalidate() }
 
         // Files to download (config and tokenizer)
         var filesToDownload = [
@@ -174,6 +176,8 @@ public enum HuggingFaceDownloader {
 
             if !FileManager.default.fileExists(atPath: indexPath.path) {
                 let indexURL = URL(string: "\(baseURL)/model.safetensors.index.json")!
+                let session = URLSession(configuration: .default)
+                defer { session.finishTasksAndInvalidate() }
                 if let (tempURL, indexResponse) = try? await session.download(from: indexURL),
                    let httpResponse = indexResponse as? HTTPURLResponse,
                    httpResponse.statusCode == 200 {
@@ -197,19 +201,85 @@ public enum HuggingFaceDownloader {
             filesToDownload.append(contentsOf: modelFiles)
         }
 
+        let totalFiles = Double(filesToDownload.count)
+
         for (index, file) in filesToDownload.enumerated() {
             let safeFile = try validatedRemoteFileName(file)
             let localPath = try validatedLocalPath(directory: directory, fileName: safeFile)
 
             if FileManager.default.fileExists(atPath: localPath.path) {
-                progressHandler?(Double(index + 1) / Double(filesToDownload.count))
+                progressHandler?(Double(index + 1) / totalFiles)
                 continue
             }
 
+            let fileIndex = Double(index)
             let url = URL(string: "\(baseURL)/\(safeFile)")!
-            try await downloadFile(url: url, to: localPath, session: session, fileName: safeFile)
 
-            progressHandler?(Double(index + 1) / Double(filesToDownload.count))
+            try await downloadFile(url: url, to: localPath, fileName: safeFile) { bytesWritten, totalBytes in
+                if totalBytes > 0 {
+                    let fileProgress = Double(bytesWritten) / Double(totalBytes)
+                    let overall = (fileIndex + fileProgress) / totalFiles
+                    progressHandler?(overall)
+                }
+            }
+
+            progressHandler?(Double(index + 1) / totalFiles)
         }
+    }
+}
+
+// MARK: - Download Delegate (byte-level progress via URLSessionDownloadDelegate)
+
+/// Bridges URLSessionDownloadTask to async/await with byte-level progress callbacks.
+private class DownloadDelegate: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
+    let localPath: URL
+    let fileName: String
+    private var continuation: CheckedContinuation<Void, Error>?
+    let onProgress: ((Int64, Int64) -> Void)?
+    var session: URLSession?
+
+    init(localPath: URL, fileName: String, continuation: CheckedContinuation<Void, Error>,
+         onProgress: ((Int64, Int64) -> Void)?) {
+        self.localPath = localPath
+        self.fileName = fileName
+        self.continuation = continuation
+        self.onProgress = onProgress
+    }
+
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
+                    didWriteData bytesWritten: Int64, totalBytesWritten: Int64,
+                    totalBytesExpectedToWrite: Int64) {
+        onProgress?(totalBytesWritten, totalBytesExpectedToWrite)
+    }
+
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
+                    didFinishDownloadingTo location: URL) {
+        let fm = FileManager.default
+        do {
+            if fm.fileExists(atPath: localPath.path) {
+                try fm.removeItem(at: localPath)
+            }
+            try fm.moveItem(at: location, to: localPath)
+        } catch {
+            continuation?.resume(throwing: error)
+            continuation = nil
+        }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        defer {
+            self.session?.finishTasksAndInvalidate()
+            self.session = nil
+        }
+        if let error {
+            continuation?.resume(throwing: error)
+        } else if let httpResponse = task.response as? HTTPURLResponse,
+                  httpResponse.statusCode != 200 {
+            continuation?.resume(throwing: DownloadError.failedToDownload(
+                "\(fileName) (HTTP \(httpResponse.statusCode))"))
+        } else {
+            continuation?.resume()
+        }
+        continuation = nil
     }
 }
